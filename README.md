@@ -87,6 +87,7 @@ Note: si le dump référence des apps non présentes dans `data/apps`, la comman
 
 - Chaque client est isolé avec son propre projet compose, sa base MariaDB, Redis et volumes.
 - Le dossier des apps est exposé sur l'hôte dans `clients/<client>/data/apps`.
+- Les apps de base (`frappe`, `erpnext`) sont automatiquement seedées depuis l'image au create/up/site-create si `data/apps` est vide.
 - Le port HTTP est exposé en local (`localhost:<port>`).
 - Si le port n'est pas fourni à la création, le script prend automatiquement le prochain port libre à partir de `8080`.
 - Les mots de passe admin/db sont générés automatiquement dans `clients/<client>/.env`.

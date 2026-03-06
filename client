@@ -88,9 +88,36 @@ dc() {
   docker compose -f "$(compose_file "$client")" --env-file "$(env_file "$client")" -p "$project" "$@"
 }
 
+seed_apps_from_image() {
+  local client="$1"
+  local version
+  version="$(get_env "$client" ERPNEXT_VERSION)"
+  [[ -n "$version" ]] || log_err "ERPNEXT_VERSION manquant pour ${client}"
+  local image="frappe/erpnext:${version}"
+  local apps_dir
+  apps_dir="$(client_dir "$client")/data/apps"
+  mkdir -p "$apps_dir"
+
+  log_info "Initialisation de data/apps depuis ${image}..."
+  local cid
+  cid="$(docker create "$image")"
+  docker cp "${cid}:/home/frappe/frappe-bench/apps/." "$apps_dir/"
+  docker rm "$cid" >/dev/null
+}
+
+ensure_base_apps_seeded() {
+  local client="$1"
+  local apps_dir
+  apps_dir="$(client_dir "$client")/data/apps"
+  if [[ ! -d "${apps_dir}/frappe" || ! -d "${apps_dir}/erpnext" ]]; then
+    seed_apps_from_image "$client"
+  fi
+}
+
 bench_exec() {
   local client="$1"
   local cmd="$2"
+  ensure_base_apps_seeded "$client"
   dc "$client" up -d db redis-cache redis-queue backend >/dev/null 2>&1
   dc "$client" exec -T backend bash -lc "$cmd"
 }
@@ -235,7 +262,7 @@ host_clone_and_copy_app() {
   bench_exec "$client" "cd /home/frappe/frappe-bench && bench get-app --skip-assets /tmp/${repo_name}"
   bench_exec "$client" "cd /home/frappe/frappe-bench && rm -rf /tmp/${repo_name}"
 
-  rm -r "$tmp_dir"
+  rm -rf "$tmp_dir"
   log_ok "App ${repo_name} récupérée dans le bench."
 }
 
@@ -298,6 +325,8 @@ Commandes:
 - ../../client logs ${client}
 EOFCLIENT
 
+    ensure_base_apps_seeded "$client"
+
     log_ok "Client '${client}' créé (${erpnext_version}, port ${http_port})."
     log_info "Démarrage: ./client up ${client}"
     log_info "Initialisation du site: ./client site-create ${client}"
@@ -322,6 +351,7 @@ EOFCLIENT
 
   up)
     [[ -n "$client" ]] || usage
+    ensure_base_apps_seeded "$client"
     log_info "Démarrage de ${client}..."
     dc "$client" up -d
     log_ok "Client ${client} démarré."
@@ -366,6 +396,7 @@ EOFCLIENT
 
   site-create)
     [[ -n "$client" ]] || usage
+    ensure_base_apps_seeded "$client"
     log_info "Création/initialisation du site ERPNext pour ${client}..."
     dc "$client" --profile init run --rm create-site
     log_ok "Site créé pour ${client}."
