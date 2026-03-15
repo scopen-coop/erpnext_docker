@@ -34,6 +34,8 @@ Usage:
   ./client app-install <client> <app_name>
   ./client app-get-install <client> <repo_url> [branch] [app_name]
   ./client restore <client> <dump.sql|dump.sql.gz> [db_name]
+  ./client bench-update <client> [bench_update_args...]
+  ./client git-remote-set <client> <app_name> <repo_url> [branch]
   ./client url <client>
 USAGE
   exit 1
@@ -126,7 +128,26 @@ reload_after_app_install() {
   local client="$1"
   local site="$2"
   bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"$site\" clear-cache"
-  dc "$client" restart backend frontend websocket >/dev/null 2>&1
+  restart_runtime_services "$client"
+}
+
+restart_runtime_services() {
+  local client="$1"
+  local defined_services
+  defined_services="$(dc "$client" config --services 2>/dev/null || true)"
+  local services=(backend frontend websocket)
+  local to_restart=()
+  local service
+
+  for service in "${services[@]}"; do
+    if grep -qx "$service" <<<"$defined_services"; then
+      to_restart+=("$service")
+    fi
+  done
+
+  if (( ${#to_restart[@]} > 0 )); then
+    dc "$client" restart "${to_restart[@]}" >/dev/null 2>&1
+  fi
 }
 
 installed_apps_from_db() {
@@ -135,6 +156,20 @@ installed_apps_from_db() {
   local db_root_password
   db_root_password="$(get_env "$client" DB_ROOT_PASSWORD)"
   dc "$client" exec -T db mariadb -N -s -uroot -p"$db_root_password" "$db_name" -e "SELECT app_name FROM \`tabInstalled Applications\`;" 2>/dev/null || true
+}
+
+required_apps_after_restore() {
+  local client="$1"
+  local db_name="$2"
+  local site_apps_file
+  site_apps_file="$(client_dir "$client")/data/sites/apps.txt"
+
+  {
+    installed_apps_from_db "$client" "$db_name"
+    if [[ -f "$site_apps_file" ]]; then
+      cat "$site_apps_file"
+    fi
+  } | sed '/^[[:space:]]*$/d' | sort -u
 }
 
 is_app_importable() {
@@ -154,14 +189,16 @@ repair_apps_after_restore() {
 
   local repaired=0
   local missing_apps=()
+  dc "$client" up -d db redis-cache redis-queue backend >/dev/null 2>&1
+
   local app
   while IFS= read -r app; do
     [[ -z "$app" ]] && continue
-    if is_app_importable "$client" "$app"; then
-      continue
-    fi
 
     if [[ -d "${apps_dir}/${app}" ]]; then
+      if is_app_importable "$client" "$app"; then
+        continue
+      fi
       log_warn "App '${app}' absente de l'env Python, réparation depuis data/apps/${app}..."
       dc "$client" exec -T backend bash -lc "cd /home/frappe/frappe-bench && env/bin/pip install -e apps/${app}"
       dc "$client" exec -T backend bash -lc "cd /home/frappe/frappe-bench && grep -qx '${app}' sites/apps.txt || echo '${app}' >> sites/apps.txt"
@@ -172,10 +209,10 @@ repair_apps_after_restore() {
     else
       missing_apps+=("$app")
     fi
-  done < <(installed_apps_from_db "$client" "$db_name")
+  done < <(required_apps_after_restore "$client" "$db_name")
 
   if (( repaired == 1 )); then
-    dc "$client" restart backend frontend websocket >/dev/null 2>&1
+    restart_runtime_services "$client"
   fi
 
   if (( ${#missing_apps[@]} > 0 )); then
@@ -261,9 +298,35 @@ host_clone_and_copy_app() {
   docker cp "$repo_dir" "${backend_id}:/tmp/${repo_name}"
   bench_exec "$client" "cd /home/frappe/frappe-bench && bench get-app --skip-assets /tmp/${repo_name}"
   bench_exec "$client" "cd /home/frappe/frappe-bench && rm -rf /tmp/${repo_name}"
+  set_app_git_remote "$client" "$repo_name" "$repo_url" "$branch"
 
   rm -rf "$tmp_dir"
   log_ok "App ${repo_name} récupérée dans le bench."
+}
+
+set_app_git_remote() {
+  local client="$1"
+  local app_name="$2"
+  local repo_url="$3"
+  local branch="${4:-}"
+  local app_path
+  app_path="$(client_dir "$client")/data/apps/${app_name}"
+  [[ -d "${app_path}/.git" ]] || log_err "Repo git introuvable: ${app_path}"
+
+  if git -C "$app_path" remote get-url origin >/dev/null 2>&1; then
+    git -C "$app_path" remote set-url origin "$repo_url"
+  elif git -C "$app_path" remote get-url upstream >/dev/null 2>&1; then
+    git -C "$app_path" remote rename upstream origin
+    git -C "$app_path" remote set-url origin "$repo_url"
+  else
+    git -C "$app_path" remote add origin "$repo_url"
+  fi
+
+  if [[ -n "$branch" ]]; then
+    if git -C "$app_path" rev-parse --verify "$branch" >/dev/null 2>&1; then
+      git -C "$app_path" branch --set-upstream-to="origin/${branch}" "$branch" >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
 next_port() {
@@ -351,9 +414,10 @@ EOFCLIENT
 
   up)
     [[ -n "$client" ]] || usage
+    extra_args=("${@:3}")
     ensure_base_apps_seeded "$client"
     log_info "Démarrage de ${client}..."
-    dc "$client" up -d
+    dc "$client" up -d --remove-orphans "${extra_args[@]}"
     log_ok "Client ${client} démarré."
     ;;
 
@@ -493,6 +557,39 @@ EOFCLIENT
 
     repair_apps_after_restore "$client" "$db_name"
     log_ok "Restauration terminée pour '${client}' (DB: ${db_name})."
+    ;;
+
+  bench-update)
+    [[ -n "$client" ]] || usage
+    bench_args=("${@:3}")
+    if (( ${#bench_args[@]} == 0 )); then
+      bench_args=(--patch)
+    fi
+    site="$(get_env "$client" SITE_NAME)"
+    log_info "Bench update pour ${client}: ${bench_args[*]}"
+
+    non_updatable_apps="$(dc "$client" exec -T backend bash -lc 'cd /home/frappe/frappe-bench && for app in $(cat sites/apps.txt); do if [[ ! -d \"apps/$app/.git\" ]]; then echo \"$app\"; elif ! git -C \"apps/$app\" symbolic-ref -q --short HEAD >/dev/null 2>&1; then echo \"$app\"; fi; done' 2>/dev/null || true)"
+    if [[ -n "${non_updatable_apps}" ]]; then
+      app_list="$(tr '\n' ',' <<<"${non_updatable_apps}" | sed 's/,$//')"
+      log_warn "Apps non updatables via git détectées (${app_list}). Fallback vers migrate."
+      bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"$site\" migrate && bench --site \"$site\" clear-cache"
+    else
+      bench_exec "$client" "cd /home/frappe/frappe-bench && bench update ${bench_args[*]}"
+    fi
+
+    restart_runtime_services "$client"
+    log_ok "Bench update terminé pour ${client}."
+    ;;
+
+  git-remote-set)
+    [[ -n "$client" ]] || usage
+    app_name="${3:-}"
+    repo_url="${4:-}"
+    branch="${5:-}"
+    [[ -n "$app_name" && -n "$repo_url" ]] || log_err "Usage: ./client git-remote-set <client> <app_name> <repo_url> [branch]"
+    need_cmd git
+    set_app_git_remote "$client" "$app_name" "$repo_url" "$branch"
+    log_ok "Remote git configuré pour ${client}/${app_name}: ${repo_url}"
     ;;
 
   url)
