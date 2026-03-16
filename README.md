@@ -1,31 +1,38 @@
-# ERPNext Docker Multi-Client
+# ERPNext Docker Multi-Client (Dev, sans image `frappe/erpnext`)
 
-Projet pour créer et gérer des environnements Docker ERPNext/Frappe par client via un client Bash, sur le même modèle d'exploitation que tes stacks `~/Dev/*-docker`.
+Ce setup multi-client est orienté développement et n'utilise pas l'image Docker Hub `frappe/erpnext`.
+
+Principe:
+- image locale buildée depuis ce repo (`Dockerfile`)
+- code `frappe`/`erpnext` cloné en Git dans `clients/<client>/data/apps`
+- stack compose explicite (backend, websocket, workers, scheduler, db, redis)
 
 ## Structure
 
-- `./client` : CLI Bash principale
-- `clients/<nom>/` : environnement d'un client (`.env`, `docker-compose.yml`, données persistantes dont `data/apps`)
-- `templates/docker-compose.client.yml` : template compose ERPNext/Frappe
+- `./client` : CLI Bash
+- `./Dockerfile` : image dev locale Frappe (bench)
+- `clients/<nom>/` : environnement client (`.env`, `docker-compose.yml`, `data/*`)
+- `templates/docker-compose.client.yml` : template compose
 
 ## Prérequis
 
-- Docker + Docker Compose plugin (`docker compose`)
+- Docker + plugin Docker Compose (`docker compose`)
+- Git
 - Bash
 
 ## Démarrage rapide
 
 ```bash
-# 1) Créer un client
-./client create acme v16.5.0 8080 acme.local
+# 1) Créer un client (branche Frappe/ERPNext)
+./client create acme version-15 8080 acme.local
 
-# 2) Démarrer les services
+# 2) Build + démarrage
 ./client up acme
 
-# 3) Créer le site ERPNext (première fois)
+# 3) Créer le site (première fois)
 ./client site-create acme
 
-# 4) Ouvrir ERPNext
+# 4) URL
 ./client url acme
 ```
 
@@ -33,7 +40,7 @@ Projet pour créer et gérer des environnements Docker ERPNext/Frappe par client
 
 ```bash
 ./client list
-./client create <client> [erpnext_version] [http_port] [site_name]
+./client create <client> [frappe_branch] [http_port] [site_name]
 ./client up <client>
 ./client down <client>
 ./client restart <client>
@@ -45,51 +52,13 @@ Projet pour créer et gérer des environnements Docker ERPNext/Frappe par client
 ./client app-get <client> <repo_url> [branch]
 ./client app-install <client> <app_name>
 ./client app-get-install <client> <repo_url> [branch] [app_name]
-./client restore <client> <dump.sql|dump.sql.gz> [db_name]
+./client bench-update <client> [bench_update_args...]
 ./client fix-perms <client>
 ./client url <client>
 ```
 
-## Installation d'apps
+## Notes
 
-```bash
-# Lister apps disponibles dans le bench + apps installées sur le site
-./client app-list acme
-
-# Récupérer une app custom depuis Git
-./client app-get acme https://github.com/frappe/hrms.git version-16
-
-# Repo SSH privé: le clone est fait sur l'hôte puis copié dans le conteneur
-./client app-get acme git@github.com:my-org/my-private-app.git version-16
-
-# Installer une app déjà présente dans le bench
-./client app-install acme hrms
-
-# Récupérer + installer en une commande
-./client app-get-install acme https://github.com/frappe/payments.git version-16 payments
-```
-
-## Restauration BDD
-
-```bash
-# Restaure dans la DB du site (détectée via site_config.json)
-./client restore acme /path/to/dump.sql
-
-# Dump compressé
-./client restore acme /path/to/dump.sql.gz
-
-# Forcer une base cible spécifique
-./client restore acme /path/to/dump.sql.gz acme_db
-```
-
-Note: si le dump référence des apps non présentes dans `data/apps`, la commande échoue explicitement avec la liste des apps à installer (pour éviter une erreur 500 silencieuse).
-
-## Notes d'exploitation
-
-- Chaque client est isolé avec son propre projet compose, sa base MariaDB, Redis et volumes.
-- Le dossier des apps est exposé sur l'hôte dans `clients/<client>/data/apps`.
-- Les apps de base (`frappe`, `erpnext`) sont automatiquement seedées depuis l'image au create/up/site-create si `data/apps` est vide.
-- Le port HTTP est exposé en local (`localhost:<port>`).
-- Si le port n'est pas fourni à la création, le script prend automatiquement le prochain port libre à partir de `8080`.
-- Les mots de passe admin/db sont générés automatiquement dans `clients/<client>/.env`.
-- En cas de volumes créés avec de mauvais droits (erreurs `Permission denied` sur `sites/` ou `logs/bench.log`), lancer `./client fix-perms <client>`.
+- `version-15` / `v15` / `15` sont normalisés vers `version-15` pour le clone Git.
+- Le premier `./client up <client>` fait le build Docker local (plus long).
+- Le backend est exposé directement sur `http://localhost:<port>`.

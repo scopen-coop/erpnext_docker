@@ -18,10 +18,10 @@ log_err() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 usage() {
   cat <<USAGE
-ERPNext/Frappe Docker Client Manager
+ERPNext/Frappe Docker Client Manager (dev)
 Usage:
   ./client list
-  ./client create <client> [erpnext_version] [http_port] [site_name]
+  ./client create <client> [frappe_branch] [http_port] [site_name]
   ./client up <client>
   ./client down <client>
   ./client restart <client>
@@ -29,13 +29,12 @@ Usage:
   ./client logs <client> [service]
   ./client shell <client>
   ./client site-create <client>
+  ./client restore <client> <backup_sql_gz> [site_name]
   ./client app-list <client>
   ./client app-get <client> <repo_url> [branch]
   ./client app-install <client> <app_name>
   ./client app-get-install <client> <repo_url> [branch] [app_name]
-  ./client restore <client> <dump.sql|dump.sql.gz> [db_name]
   ./client bench-update <client> [bench_update_args...]
-  ./client git-remote-set <client> <app_name> <repo_url> [branch]
   ./client fix-perms <client>
   ./client url <client>
 USAGE
@@ -57,6 +56,27 @@ rand_hex() {
 
 is_valid_name() {
   [[ "$1" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]]
+}
+
+normalize_frappe_branch() {
+  local input="$1"
+
+  if [[ "$input" =~ ^version-[0-9]+$ ]]; then
+    echo "$input"
+    return
+  fi
+
+  if [[ "$input" =~ ^v?([0-9]+)(\..*)?$ ]]; then
+    echo "version-${BASH_REMATCH[1]}"
+    return
+  fi
+
+  if [[ "$input" == "develop" ]]; then
+    echo "develop"
+    return
+  fi
+
+  echo "$input"
 }
 
 client_dir() {
@@ -91,247 +111,74 @@ dc() {
   docker compose -f "$(compose_file "$client")" --env-file "$(env_file "$client")" -p "$project" "$@"
 }
 
-seed_apps_from_image() {
+seed_apps_from_git() {
   local client="$1"
-  local version
-  version="$(get_env "$client" ERPNEXT_VERSION)"
-  [[ -n "$version" ]] || log_err "ERPNEXT_VERSION manquant pour ${client}"
-  local image="frappe/erpnext:${version}"
-  local apps_dir
-  apps_dir="$(client_dir "$client")/data/apps"
+  need_cmd git
+
+  local cdir apps_dir branch
+  cdir="$(client_dir "$client")"
+  apps_dir="${cdir}/data/apps"
+  branch="$(get_env "$client" FRAPPE_BRANCH)"
+
   mkdir -p "$apps_dir"
 
-  log_info "Initialisation de data/apps depuis ${image}..."
-  local cid
-  cid="$(docker create "$image")"
-  docker cp "${cid}:/home/frappe/frappe-bench/apps/." "$apps_dir/"
-  docker rm "$cid" >/dev/null
-}
-
-ensure_base_apps_seeded() {
-  local client="$1"
-  local apps_dir
-  apps_dir="$(client_dir "$client")/data/apps"
-  if [[ ! -d "${apps_dir}/frappe" || ! -d "${apps_dir}/erpnext" ]]; then
-    seed_apps_from_image "$client"
-  fi
-}
-
-core_branch_from_erpnext_version() {
-  local version="$1"
-
-  if [[ "$version" =~ ^version-([0-9]+)$ ]]; then
-    echo "version-${BASH_REMATCH[1]}"
-    return
+  if [[ ! -d "${apps_dir}/frappe/.git" ]]; then
+    log_info "Clone frappe (${branch}) dans data/apps..."
+    rm -rf "${apps_dir}/frappe"
+    git clone --depth 1 --branch "$branch" https://github.com/frappe/frappe.git "${apps_dir}/frappe"
   fi
 
-  if [[ "$version" =~ ^v?([0-9]+)(\..*)?$ ]]; then
-    echo "version-${BASH_REMATCH[1]}"
-    return
+  if [[ ! -d "${apps_dir}/erpnext/.git" ]]; then
+    log_info "Clone erpnext (${branch}) dans data/apps..."
+    rm -rf "${apps_dir}/erpnext"
+    git clone --depth 1 --branch "$branch" https://github.com/frappe/erpnext.git "${apps_dir}/erpnext"
   fi
-
-  if [[ "$version" == "develop" || "$version" == "nightly" ]]; then
-    echo "develop"
-    return
-  fi
-
-  echo "develop"
-}
-
-git_remote_branch_exists() {
-  local repo_url="$1"
-  local branch="$2"
-  git ls-remote --exit-code --heads "$repo_url" "$branch" >/dev/null 2>&1
-}
-
-ensure_core_apps_git_ready() {
-  local client="$1"
-  local apps_dir
-  apps_dir="$(client_dir "$client")/data/apps"
-  local backups_root
-  backups_root="$(client_dir "$client")/data/app-backups"
-  mkdir -p "$backups_root"
-  local version
-  version="$(get_env "$client" ERPNEXT_VERSION)"
-  local branch
-  branch="$(core_branch_from_erpnext_version "$version")"
-  local changed=0
-
-  local spec app_name repo_url app_dir target_branch backup_dir
-  for spec in \
-    "frappe|https://github.com/frappe/frappe.git" \
-    "erpnext|https://github.com/frappe/erpnext.git"; do
-    app_name="${spec%%|*}"
-    repo_url="${spec##*|}"
-    app_dir="${apps_dir}/${app_name}"
-
-    if [[ -d "$app_dir" && ! -d "${app_dir}/.git" ]]; then
-      need_cmd git
-      target_branch="$branch"
-      if ! git_remote_branch_exists "$repo_url" "$target_branch"; then
-        if git_remote_branch_exists "$repo_url" "develop"; then
-          target_branch="develop"
-        else
-          log_err "Impossible de trouver une branche Git valide pour ${app_name} (${branch}/develop absentes)."
-        fi
-      fi
-
-      backup_dir="${backups_root}/${app_name}.pre-git-backup-$(date +%Y%m%d%H%M%S)"
-      log_warn "App ${app_name} sans .git: conversion en repo Git (backup: ${backup_dir##*/})..."
-      mv "$app_dir" "$backup_dir"
-
-      if git clone --branch "$target_branch" "$repo_url" "$app_dir" >/dev/null 2>&1; then
-        changed=1
-        log_ok "App ${app_name} convertie en Git (${target_branch})."
-      else
-        rm -rf "$app_dir"
-        mv "$backup_dir" "$app_dir"
-        log_err "Échec du clone Git pour ${app_name}; dossier restauré depuis backup."
-      fi
-    fi
-  done
-
-  if (( changed == 1 )); then
-    fix_permissions "$client"
-  fi
-}
-
-cleanup_legacy_git_backups_from_apps_dir() {
-  local client="$1"
-  local apps_dir
-  apps_dir="$(client_dir "$client")/data/apps"
-  local backups_root
-  backups_root="$(client_dir "$client")/data/app-backups"
-  mkdir -p "$backups_root"
-
-  local legacy
-  shopt -s nullglob
-  for legacy in "${apps_dir}"/frappe.pre-git-backup-* "${apps_dir}"/erpnext.pre-git-backup-*; do
-    [[ -e "$legacy" ]] || continue
-    mv "$legacy" "${backups_root}/"
-  done
-  shopt -u nullglob
-}
-
-sanitize_site_apps_file() {
-  local client="$1"
-  local site_apps_file
-  site_apps_file="$(client_dir "$client")/data/sites/apps.txt"
-  [[ -f "$site_apps_file" ]] || return 0
-
-  local tmp_file
-  tmp_file="$(mktemp)"
-  while IFS= read -r app; do
-    app="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//' <<<"$app")"
-    [[ -z "$app" ]] && continue
-    if [[ "$app" == *.pre-git-backup-* ]]; then
-      continue
-    fi
-    echo "$app" >>"$tmp_file"
-  done <"$site_apps_file"
-
-  sort -u "$tmp_file" >"$site_apps_file"
-  rm -f "$tmp_file"
-}
-
-non_updatable_apps_for_client() {
-  local client="$1"
-  local apps_dir
-  apps_dir="$(client_dir "$client")/data/apps"
-  local site_apps_file
-  site_apps_file="$(client_dir "$client")/data/sites/apps.txt"
-
-  [[ -f "$site_apps_file" ]] || return 0
-
-  local app
-  while IFS= read -r app; do
-    app="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//' <<<"$app")"
-    [[ -z "$app" ]] && continue
-
-    if [[ ! -d "${apps_dir}/${app}/.git" ]]; then
-      echo "$app"
-    elif ! git -C "${apps_dir}/${app}" symbolic-ref -q --short HEAD >/dev/null 2>&1; then
-      echo "$app"
-    fi
-  done <"$site_apps_file"
-}
-
-ensure_upstream_remote_for_bench_update() {
-  local client="$1"
-  local apps_dir
-  apps_dir="$(client_dir "$client")/data/apps"
-  local site_apps_file
-  site_apps_file="$(client_dir "$client")/data/sites/apps.txt"
-  [[ -f "$site_apps_file" ]] || return 0
-
-  local app app_dir origin_url target_upstream
-  while IFS= read -r app; do
-    app="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//' <<<"$app")"
-    [[ -z "$app" ]] && continue
-    app_dir="${apps_dir}/${app}"
-    [[ -d "${app_dir}/.git" ]] || continue
-
-    if git -C "$app_dir" remote get-url upstream >/dev/null 2>&1; then
-      continue
-    fi
-
-    target_upstream=""
-    case "$app" in
-      frappe) target_upstream="https://github.com/frappe/frappe.git" ;;
-      erpnext) target_upstream="https://github.com/frappe/erpnext.git" ;;
-      *)
-        origin_url="$(git -C "$app_dir" remote get-url origin 2>/dev/null || true)"
-        if [[ -n "$origin_url" ]]; then
-          target_upstream="$origin_url"
-        fi
-        ;;
-    esac
-
-    if [[ -n "$target_upstream" ]]; then
-      git -C "$app_dir" remote add upstream "$target_upstream" >/dev/null 2>&1 || true
-    fi
-  done <"$site_apps_file"
 }
 
 fix_permissions() {
   local client="$1"
-  local version
-  version="$(get_env "$client" ERPNEXT_VERSION)"
-  [[ -n "$version" ]] || log_err "ERPNEXT_VERSION manquant pour ${client}"
-
   local cdir
   cdir="$(client_dir "$client")"
   mkdir -p "$cdir"/data/{apps,sites,logs}
+  chmod -R u+rwX,g+rwX "$cdir"/data/apps "$cdir"/data/sites "$cdir"/data/logs 2>/dev/null || true
+}
 
-  docker run --rm -u 0:0 \
-    -v "${cdir}/data/apps:/home/frappe/frappe-bench/apps" \
-    -v "${cdir}/data/sites:/home/frappe/frappe-bench/sites" \
-    -v "${cdir}/data/logs:/home/frappe/frappe-bench/logs" \
-    "frappe/erpnext:${version}" \
-    bash -lc 'chown -R frappe:frappe /home/frappe/frappe-bench/apps /home/frappe/frappe-bench/sites /home/frappe/frappe-bench/logs && chmod -R u+rwX,g+rwX /home/frappe/frappe-bench/apps /home/frappe/frappe-bench/sites /home/frappe/frappe-bench/logs' >/dev/null
+sync_ssh_to_backend() {
+  local client="$1"
+  local ssh_dir="${HOME}/.ssh"
+  local backend_cid
+  local tmp_ssh
+
+  [[ -d "$ssh_dir" ]] || return 0
+  backend_cid="$(dc "$client" ps -q backend | head -n1)"
+  [[ -n "$backend_cid" ]] || return 0
+
+  tmp_ssh="$(mktemp -d)"
+  cp -a "${ssh_dir}/." "${tmp_ssh}/" 2>/dev/null || true
+  find "$tmp_ssh" -type s -delete 2>/dev/null || true
+
+  dc "$client" exec -T backend bash -lc "mkdir -p /home/frappe/.ssh && chmod 700 /home/frappe/.ssh"
+  docker cp "${tmp_ssh}/." "${backend_cid}:/home/frappe/.ssh/"
+  dc "$client" exec -T backend bash -lc "chmod 700 /home/frappe/.ssh && find /home/frappe/.ssh -type f -exec chmod 600 {} + && touch /home/frappe/.ssh/known_hosts && ssh-keyscan -H github.com >> /home/frappe/.ssh/known_hosts 2>/dev/null || true && chmod 644 /home/frappe/.ssh/known_hosts"
+  rm -rf "$tmp_ssh"
 }
 
 bench_exec() {
   local client="$1"
   local cmd="$2"
-  ensure_base_apps_seeded "$client"
-  fix_permissions "$client"
-  dc "$client" up -d db redis-cache redis-queue backend >/dev/null 2>&1
-  dc "$client" exec -T backend bash -lc "$cmd"
-}
 
-reload_after_app_install() {
-  local client="$1"
-  local site="$2"
-  bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"$site\" clear-cache"
-  restart_runtime_services "$client"
+  seed_apps_from_git "$client"
+  fix_permissions "$client"
+  dc "$client" up -d db redis-cache redis-queue redis-socketio backend websocket queue-short queue-long scheduler >/dev/null 2>&1
+  sync_ssh_to_backend "$client"
+  dc "$client" exec -T backend bash -lc "cd /home/frappe/frappe-bench && if [[ -d apps/erpnext ]]; then env/bin/pip install -q -e apps/erpnext; fi && env/bin/pip install -q -e apps/frappe && for app in \$(ls -1 apps); do if [[ \"\$app\" != \"frappe\" && \"\$app\" != \"erpnext\" ]] && [[ -f \"apps/\$app/pyproject.toml\" || -f \"apps/\$app/setup.py\" ]]; then env/bin/pip install -q -e \"apps/\$app\"; fi; done && $cmd"
 }
 
 restart_runtime_services() {
   local client="$1"
   local defined_services
   defined_services="$(dc "$client" config --services 2>/dev/null || true)"
-  local services=(backend frontend websocket)
+  local services=(backend websocket queue-short queue-long scheduler)
   local to_restart=()
   local service
 
@@ -344,187 +191,36 @@ restart_runtime_services() {
   if (( ${#to_restart[@]} > 0 )); then
     dc "$client" restart "${to_restart[@]}" >/dev/null 2>&1
   fi
+
+  wait_http_ready "$client"
 }
 
-installed_apps_from_db() {
+wait_http_ready() {
   local client="$1"
-  local db_name="$2"
-  local db_root_password
-  db_root_password="$(get_env "$client" DB_ROOT_PASSWORD)"
-  dc "$client" exec -T db mariadb -N -s -uroot -p"$db_root_password" "$db_name" -e "SELECT app_name FROM \`tabInstalled Applications\`;" 2>/dev/null || true
-}
+  local port
+  port="$(get_env "$client" HTTP_PORT)"
+  local timeout=180
+  local elapsed=0
 
-required_apps_after_restore() {
-  local client="$1"
-  local db_name="$2"
-  local site_apps_file
-  site_apps_file="$(client_dir "$client")/data/sites/apps.txt"
-
-  {
-    installed_apps_from_db "$client" "$db_name"
-    if [[ -f "$site_apps_file" ]]; then
-      cat "$site_apps_file"
+  while (( elapsed < timeout )); do
+    if curl -fsS "http://localhost:${port}/api/method/ping" 2>/dev/null | grep -q "pong"; then
+      return 0
     fi
-  } | sed '/^[[:space:]]*$/d' | sort -u
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+
+  log_warn "Le backend semble encore en cours de démarrage (timeout ${timeout}s)."
 }
 
-is_app_importable() {
+ensure_upstream_remotes() {
   local client="$1"
-  local app="$2"
-  dc "$client" up -d db redis-cache redis-queue backend >/dev/null 2>&1
-  dc "$client" exec -T backend bash -lc "cd /home/frappe/frappe-bench && env/bin/python -c 'import ${app}'" >/dev/null 2>&1
+  bench_exec "$client" "cd /home/frappe/frappe-bench/apps && if [[ -d frappe/.git ]]; then git -C frappe remote get-url upstream >/dev/null 2>&1 || git -C frappe remote add upstream https://github.com/frappe/frappe.git; fi && if [[ -d erpnext/.git ]]; then git -C erpnext remote get-url upstream >/dev/null 2>&1 || git -C erpnext remote add upstream https://github.com/frappe/erpnext.git; fi"
 }
 
-repair_apps_after_restore() {
+cleanup_git_locks() {
   local client="$1"
-  local db_name="$2"
-  local apps_dir
-  apps_dir="$(client_dir "$client")/data/apps"
-  local site
-  site="$(get_env "$client" SITE_NAME)"
-
-  local repaired=0
-  local missing_apps=()
-  dc "$client" up -d db redis-cache redis-queue backend >/dev/null 2>&1
-
-  local app
-  while IFS= read -r app; do
-    [[ -z "$app" ]] && continue
-
-    if [[ -d "${apps_dir}/${app}" ]]; then
-      if is_app_importable "$client" "$app"; then
-        continue
-      fi
-      log_warn "App '${app}' absente de l'env Python, réparation depuis data/apps/${app}..."
-      dc "$client" exec -T backend bash -lc "cd /home/frappe/frappe-bench && env/bin/pip install -e apps/${app}"
-      dc "$client" exec -T backend bash -lc "cd /home/frappe/frappe-bench && grep -qx '${app}' sites/apps.txt || echo '${app}' >> sites/apps.txt"
-      repaired=1
-      if ! is_app_importable "$client" "$app"; then
-        missing_apps+=("$app")
-      fi
-    else
-      missing_apps+=("$app")
-    fi
-  done < <(required_apps_after_restore "$client" "$db_name")
-
-  if (( repaired == 1 )); then
-    restart_runtime_services "$client"
-  fi
-
-  if (( ${#missing_apps[@]} > 0 )); then
-    log_error_list="$(printf '%s, ' "${missing_apps[@]}")"
-    log_error_list="${log_error_list%, }"
-    log_err "Restauration OK mais apps manquantes dans le code: ${log_error_list}. Installe-les via ./client app-get-install puis relance."
-  fi
-
-  bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"$site\" clear-cache"
-}
-
-get_json_value() {
-  local json_file="$1"
-  local key="$2"
-  if command -v jq >/dev/null 2>&1; then
-    jq -r --arg k "$key" '.[$k] // empty' "$json_file"
-  else
-    python3 - "$json_file" "$key" <<'PY'
-import json
-import sys
-path = sys.argv[1]
-key = sys.argv[2]
-with open(path, "r", encoding="utf-8") as f:
-    data = json.load(f)
-print(data.get(key, ""))
-PY
-  fi
-}
-
-site_db_name() {
-  local client="$1"
-  local site
-  site="$(get_env "$client" SITE_NAME)"
-  local site_config
-  site_config="$(client_dir "$client")/data/sites/${site}/site_config.json"
-  [[ -f "$site_config" ]] || log_err "site_config.json introuvable: ${site_config}"
-  local db_name
-  db_name="$(get_json_value "$site_config" "db_name")"
-  [[ -n "$db_name" ]] || log_err "db_name absent dans ${site_config}"
-  echo "$db_name"
-}
-
-is_ssh_repo_url() {
-  local repo_url="$1"
-  [[ "$repo_url" =~ ^git@ ]] || [[ "$repo_url" =~ ^ssh:// ]]
-}
-
-repo_name_from_url() {
-  local repo_url="$1"
-  local repo_name
-  repo_name="$(basename "$repo_url")"
-  repo_name="${repo_name%.git}"
-  echo "$repo_name"
-}
-
-host_clone_and_copy_app() {
-  local client="$1"
-  local repo_url="$2"
-  local branch="${3:-}"
-
-  need_cmd git
-  dc "$client" up -d db redis-cache redis-queue backend >/dev/null 2>&1
-
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  local repo_name
-  repo_name="$(repo_name_from_url "$repo_url")"
-  local repo_dir="${tmp_dir}/${repo_name}"
-
-  log_info "Clone sur l'hôte (SSH): ${repo_url}"
-  if [[ -n "$branch" ]]; then
-    git clone --branch "$branch" "$repo_url" "$repo_dir"
-  else
-    git clone "$repo_url" "$repo_dir"
-  fi
-
-  local backend_id
-  backend_id="$(dc "$client" ps -q backend | head -n1)"
-  [[ -n "$backend_id" ]] || log_err "Container backend introuvable pour ${client}."
-
-  local container_tmp_dir="/tmp/codex-app-import-${repo_name}-$(date +%s)-$$"
-
-  log_info "Import de l'app dans le bench du conteneur..."
-  dc "$client" exec -u root -T backend bash -lc "rm -rf '${container_tmp_dir}' '/home/frappe/frappe-bench/apps/${repo_name}'"
-  docker cp "$repo_dir" "${backend_id}:${container_tmp_dir}"
-  bench_exec "$client" "cd /home/frappe/frappe-bench && bench get-app --skip-assets '${container_tmp_dir}'"
-  dc "$client" exec -u root -T backend bash -lc "rm -rf '${container_tmp_dir}'"
-  set_app_git_remote "$client" "$repo_name" "$repo_url" "$branch"
-
-  rm -rf "$tmp_dir"
-  log_ok "App ${repo_name} récupérée dans le bench."
-}
-
-set_app_git_remote() {
-  local client="$1"
-  local app_name="$2"
-  local repo_url="$3"
-  local branch="${4:-}"
-  local app_path
-  app_path="$(client_dir "$client")/data/apps/${app_name}"
-  [[ -d "${app_path}/.git" ]] || log_err "Repo git introuvable: ${app_path}"
-
-  if git -C "$app_path" remote get-url origin >/dev/null 2>&1; then
-    git -C "$app_path" remote set-url origin "$repo_url"
-  elif git -C "$app_path" remote get-url upstream >/dev/null 2>&1; then
-    git -C "$app_path" remote rename upstream origin
-    git -C "$app_path" remote set-url origin "$repo_url"
-  else
-    git -C "$app_path" remote add origin "$repo_url"
-  fi
-
-  if [[ -n "$branch" ]]; then
-    if git -C "$app_path" rev-parse --verify "$branch" >/dev/null 2>&1; then
-      git -C "$app_path" branch --set-upstream-to="origin/${branch}" "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
+  bench_exec "$client" "cd /home/frappe/frappe-bench/apps && for app in frappe erpnext; do if [[ -d \"\$app/.git\" ]]; then rm -f \"\$app/.git/index.lock\" \"\$app/.git/shallow.lock\" \"\$app/.git/HEAD.lock\" \"\$app/.git/packed-refs.lock\"; fi; done"
 }
 
 next_port() {
@@ -547,17 +243,19 @@ client="${2:-}"
 case "$cmd" in
   create)
     need_cmd docker
+    need_cmd git
     [[ -n "$client" ]] || log_err "Nom client requis."
     is_valid_name "$client" || log_err "Nom invalide. Utilise: lettres minuscules, chiffres, tirets."
 
     cdir="$(client_dir "$client")"
     [[ ! -d "$cdir" ]] || log_err "Le client '${client}' existe déjà."
 
-    erpnext_version="${3:-v16.5.0}"
+    frappe_branch_raw="${3:-version-15}"
+    frappe_branch="$(normalize_frappe_branch "$frappe_branch_raw")"
     http_port="${4:-$(next_port)}"
     site_name="${5:-${client}.local}"
 
-    mkdir -p "$cdir"/data/{apps,db,logs,sites,redis-queue}
+    mkdir -p "$cdir"/data/{apps,db,logs,sites,redis-cache,redis-queue,redis-socketio}
     cp "$TEMPLATE_COMPOSE" "$cdir/docker-compose.yml"
 
     db_root_password="$(rand_hex 12)"
@@ -566,7 +264,7 @@ case "$cmd" in
     cat >"$cdir/.env" <<EOFENV
 PROJECT=erpnext-${client}
 CLIENT_NAME=${client}
-ERPNEXT_VERSION=${erpnext_version}
+FRAPPE_BRANCH=${frappe_branch}
 HTTP_PORT=${http_port}
 SITE_NAME=${site_name}
 DB_ROOT_PASSWORD=${db_root_password}
@@ -578,7 +276,7 @@ EOFENV
 
 - URL locale: http://localhost:${http_port}
 - Site ERPNext: ${site_name}
-- Version ERPNext image: ${erpnext_version}
+- Branche Frappe/ERPNext: ${frappe_branch}
 
 Commandes:
 - ../../client up ${client}
@@ -586,37 +284,39 @@ Commandes:
 - ../../client logs ${client}
 EOFCLIENT
 
-    ensure_base_apps_seeded "$client"
+    seed_apps_from_git "$client"
+    fix_permissions "$client"
 
-    log_ok "Client '${client}' créé (${erpnext_version}, port ${http_port})."
+    log_ok "Client '${client}' créé (${frappe_branch}, port ${http_port})."
     log_info "Démarrage: ./client up ${client}"
     log_info "Initialisation du site: ./client site-create ${client}"
     ;;
 
   list)
-    printf "%-22s %-12s %-8s %-28s %-10s\n" "CLIENT" "VERSION" "PORT" "SITE" "STATUS"
-    printf "%-22s %-12s %-8s %-28s %-10s\n" "----------------------" "------------" "--------" "----------------------------" "----------"
+    printf "%-22s %-14s %-8s %-28s %-10s\n" "CLIENT" "BRANCH" "PORT" "SITE" "STATUS"
+    printf "%-22s %-14s %-8s %-28s %-10s\n" "----------------------" "--------------" "--------" "----------------------------" "----------"
     shopt -s nullglob
     for d in "${CLIENTS_DIR}"/*; do
       [[ -d "$d" && -f "$d/.env" ]] || continue
       cname="$(basename "$d")"
-      version="$(grep '^ERPNEXT_VERSION=' "$d/.env" | cut -d= -f2)"
+      branch="$(grep '^FRAPPE_BRANCH=' "$d/.env" | cut -d= -f2)"
       port="$(grep '^HTTP_PORT=' "$d/.env" | cut -d= -f2)"
       site="$(grep '^SITE_NAME=' "$d/.env" | cut -d= -f2)"
       project="$(grep '^PROJECT=' "$d/.env" | cut -d= -f2)"
       status="$(docker compose -f "$d/docker-compose.yml" --env-file "$d/.env" -p "$project" ps --format '{{.State}}' 2>/dev/null | head -n1 || true)"
       [[ -n "$status" ]] || status="stopped"
-      printf "%-22s %-12s %-8s %-28s %-10s\n" "$cname" "$version" "$port" "$site" "$status"
+      printf "%-22s %-14s %-8s %-28s %-10s\n" "$cname" "$branch" "$port" "$site" "$status"
     done
     ;;
 
   up)
     [[ -n "$client" ]] || usage
     extra_args=("${@:3}")
-    ensure_base_apps_seeded "$client"
+    seed_apps_from_git "$client"
     fix_permissions "$client"
-    log_info "Démarrage de ${client}..."
-    dc "$client" up -d --remove-orphans "${extra_args[@]}"
+    log_info "Build/démarrage de ${client}..."
+    dc "$client" up -d --build --remove-orphans "${extra_args[@]}"
+    wait_http_ready "$client"
     log_ok "Client ${client} démarré."
     ;;
 
@@ -659,11 +359,66 @@ EOFCLIENT
 
   site-create)
     [[ -n "$client" ]] || usage
-    ensure_base_apps_seeded "$client"
+    seed_apps_from_git "$client"
     fix_permissions "$client"
+    site_name="$(get_env "$client" SITE_NAME)"
+    admin_password="$(get_env "$client" ADMIN_PASSWORD)"
+    db_root_password="$(get_env "$client" DB_ROOT_PASSWORD)"
     log_info "Création/initialisation du site ERPNext pour ${client}..."
-    dc "$client" --profile init run --rm create-site
+    bench_exec "$client" "cd /home/frappe/frappe-bench && if [[ -f \"sites/${site_name}/site_config.json\" ]]; then echo \"Site ${site_name} déjà initialisé.\"; else bench new-site --mariadb-user-host-login-scope='%' --admin-password='${admin_password}' --db-root-username=root --db-root-password='${db_root_password}' --install-app erpnext --set-default '${site_name}'; fi"
     log_ok "Site créé pour ${client}."
+    ;;
+
+  restore)
+    [[ -n "$client" ]] || usage
+    backup_src="${3:-}"
+    site_name="${4:-}"
+    [[ -n "$backup_src" ]] || log_err "Usage: ./client restore <client> <backup_sql_gz> [site_name]"
+    [[ -f "$backup_src" ]] || log_err "Backup introuvable: $backup_src"
+    [[ "$backup_src" == *.sql.gz ]] || log_warn "Le fichier ne finit pas par .sql.gz (on continue)."
+    need_cmd jq
+
+    if [[ -z "$site_name" ]]; then
+      site_name="$(get_env "$client" SITE_NAME)"
+    fi
+
+    seed_apps_from_git "$client"
+    fix_permissions "$client"
+    dc "$client" up -d db redis-cache redis-queue redis-socketio backend websocket queue-short queue-long scheduler >/dev/null 2>&1
+    sync_ssh_to_backend "$client"
+
+    cdir="$(client_dir "$client")"
+    site_backups_dir="${cdir}/data/sites/${site_name}/private/backups"
+    mkdir -p "$site_backups_dir"
+    cp "$backup_src" "${site_backups_dir}/data.sql.gz"
+    chmod 664 "${site_backups_dir}/data.sql.gz" || true
+
+    db_root_password="$(get_env "$client" DB_ROOT_PASSWORD)"
+    log_info "Restauration SQL sur ${site_name}..."
+    bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"${site_name}\" restore --mariadb-root-username root --mariadb-root-password \"${db_root_password}\" \"/home/frappe/frappe-bench/sites/${site_name}/private/backups/data.sql.gz\""
+
+    site_cfg="${cdir}/data/sites/${site_name}/site_config.json"
+    [[ -f "$site_cfg" ]] || log_err "site_config.json introuvable: $site_cfg"
+    db_name="$(jq -r '.db_name // empty' "$site_cfg")"
+    [[ -n "$db_name" ]] || log_err "db_name introuvable dans $site_cfg"
+
+    log_info "Reset des mots de passe utilisateurs (hors Administrator/Guest)..."
+    while IFS= read -r user_name; do
+      [[ -z "$user_name" ]] && continue
+      bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"${site_name}\" execute --args \"['${site_name}','${user_name}','${user_name}']\" frappe.commands.site.set_user_password"
+    done < <(dc "$client" exec -T db sh -lc "mysql -uroot -p\"${db_root_password}\" --batch --skip-column-names \"${db_name}\"" < "${ROOT_DIR}/post_restore/get_user.sql")
+
+    log_info "Sanitize email (greenmail)..."
+    dc "$client" exec -T db sh -lc "mysql -uroot -p\"${db_root_password}\" \"${db_name}\"" < "${ROOT_DIR}/post_restore/sanitize.sql"
+
+    log_info "Configuration post-restore..."
+    bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"${site_name}\" set-admin-password admin"
+    bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"${site_name}\" set-config developer_mode 1"
+    bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"${site_name}\" enable-scheduler"
+    bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"${site_name}\" migrate"
+
+    restart_runtime_services "$client"
+    log_ok "Restore terminé pour ${site_name}."
     ;;
 
   app-list)
@@ -682,9 +437,7 @@ EOFCLIENT
     branch="${4:-}"
     [[ -n "$repo_url" ]] || log_err "Usage: ./client app-get <client> <repo_url> [branch]"
     log_info "Récupération de l'app depuis ${repo_url}..."
-    if is_ssh_repo_url "$repo_url"; then
-      host_clone_and_copy_app "$client" "$repo_url" "$branch"
-    elif [[ -n "$branch" ]]; then
+    if [[ -n "$branch" ]]; then
       bench_exec "$client" "cd /home/frappe/frappe-bench && bench get-app --skip-assets --branch \"$branch\" \"$repo_url\""
     else
       bench_exec "$client" "cd /home/frappe/frappe-bench && bench get-app --skip-assets \"$repo_url\""
@@ -699,7 +452,7 @@ EOFCLIENT
     site="$(get_env "$client" SITE_NAME)"
     log_info "Installation de l'app ${app_name} sur ${site}..."
     bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"$site\" install-app \"$app_name\""
-    reload_after_app_install "$client" "$site"
+    restart_runtime_services "$client"
     log_ok "App ${app_name} installée sur ${site}."
     ;;
 
@@ -710,9 +463,7 @@ EOFCLIENT
     app_name="${5:-}"
     [[ -n "$repo_url" ]] || log_err "Usage: ./client app-get-install <client> <repo_url> [branch] [app_name]"
 
-    if is_ssh_repo_url "$repo_url"; then
-      host_clone_and_copy_app "$client" "$repo_url" "$branch"
-    elif [[ -n "$branch" ]]; then
+    if [[ -n "$branch" ]]; then
       bench_exec "$client" "cd /home/frappe/frappe-bench && bench get-app --skip-assets --branch \"$branch\" \"$repo_url\""
     else
       bench_exec "$client" "cd /home/frappe/frappe-bench && bench get-app --skip-assets \"$repo_url\""
@@ -726,80 +477,36 @@ EOFCLIENT
     site="$(get_env "$client" SITE_NAME)"
     log_info "Installation de l'app ${app_name} sur ${site}..."
     bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"$site\" install-app \"$app_name\""
-    reload_after_app_install "$client" "$site"
+    restart_runtime_services "$client"
     log_ok "App ${app_name} récupérée et installée."
-    ;;
-
-  restore)
-    [[ -n "$client" ]] || usage
-    dump_file="${3:-}"
-    db_name="${4:-}"
-    [[ -n "$dump_file" ]] || log_err "Usage: ./client restore <client> <dump.sql|dump.sql.gz> [db_name]"
-    [[ -f "$dump_file" ]] || log_err "Dump introuvable: ${dump_file}"
-
-    if [[ -z "$db_name" ]]; then
-      db_name="$(site_db_name "$client")"
-    fi
-
-    db_root_password="$(get_env "$client" DB_ROOT_PASSWORD)"
-    [[ -n "$db_root_password" ]] || log_err "DB_ROOT_PASSWORD manquant dans $(env_file "$client")"
-
-    dc "$client" up -d db >/dev/null 2>&1
-    log_info "Préparation de la base '${db_name}'..."
-    dc "$client" exec -T db mariadb -uroot -p"$db_root_password" -e "CREATE DATABASE IF NOT EXISTS \`${db_name}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-
-    log_info "Restauration du dump '${dump_file}' dans '${db_name}'..."
-    if [[ "$dump_file" == *.gz ]]; then
-      gzip -dc "$dump_file" | dc "$client" exec -T db mariadb -uroot -p"$db_root_password" "$db_name"
-    else
-      cat "$dump_file" | dc "$client" exec -T db mariadb -uroot -p"$db_root_password" "$db_name"
-    fi
-
-    repair_apps_after_restore "$client" "$db_name"
-    log_ok "Restauration terminée pour '${client}' (DB: ${db_name})."
     ;;
 
   bench-update)
     [[ -n "$client" ]] || usage
     bench_args=("${@:3}")
-    if (( ${#bench_args[@]} == 0 )); then
-      bench_args=(--patch)
-    fi
-    site="$(get_env "$client" SITE_NAME)"
+    has_reset=0
+    has_no_backup=0
+    for arg in "${bench_args[@]}"; do
+      [[ "$arg" == "--reset" ]] && has_reset=1
+      [[ "$arg" == "--no-backup" ]] && has_no_backup=1
+    done
+    (( has_reset == 1 )) || bench_args=(--reset "${bench_args[@]}")
+    (( has_no_backup == 1 )) || bench_args=(--no-backup "${bench_args[@]}")
     log_info "Bench update pour ${client}: ${bench_args[*]}"
-    ensure_base_apps_seeded "$client"
-    cleanup_legacy_git_backups_from_apps_dir "$client"
-    sanitize_site_apps_file "$client"
-    ensure_core_apps_git_ready "$client"
-    ensure_upstream_remote_for_bench_update "$client"
-
-    non_updatable_apps="$(non_updatable_apps_for_client "$client" | sort -u || true)"
-    if [[ -n "${non_updatable_apps}" ]]; then
-      app_list="$(tr '\n' ',' <<<"${non_updatable_apps}" | sed 's/,$//')"
-      log_warn "Apps non updatables via git détectées (${app_list}). Fallback vers migrate."
-      bench_exec "$client" "cd /home/frappe/frappe-bench && bench --site \"$site\" migrate && bench --site \"$site\" clear-cache"
-    else
+    seed_apps_from_git "$client"
+    ensure_upstream_remotes "$client"
+    cleanup_git_locks "$client"
+    if ! bench_exec "$client" "cd /home/frappe/frappe-bench && bench update ${bench_args[*]}"; then
+      log_warn "bench update a échoué, nettoyage des locks Git et retry..."
+      cleanup_git_locks "$client"
       bench_exec "$client" "cd /home/frappe/frappe-bench && bench update ${bench_args[*]}"
     fi
-
     restart_runtime_services "$client"
     log_ok "Bench update terminé pour ${client}."
     ;;
 
-  git-remote-set)
-    [[ -n "$client" ]] || usage
-    app_name="${3:-}"
-    repo_url="${4:-}"
-    branch="${5:-}"
-    [[ -n "$app_name" && -n "$repo_url" ]] || log_err "Usage: ./client git-remote-set <client> <app_name> <repo_url> [branch]"
-    need_cmd git
-    set_app_git_remote "$client" "$app_name" "$repo_url" "$branch"
-    log_ok "Remote git configuré pour ${client}/${app_name}: ${repo_url}"
-    ;;
-
   fix-perms)
     [[ -n "$client" ]] || usage
-    ensure_base_apps_seeded "$client"
     log_info "Correction des permissions volumes pour ${client}..."
     fix_permissions "$client"
     log_ok "Permissions corrigées pour ${client}."
