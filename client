@@ -24,6 +24,7 @@ Usage:
   ./client create <client> [frappe_branch] [http_port] [site_name]
   ./client up <client>
   ./client down <client>
+  ./client delete <client>
   ./client restart <client>
   ./client status [client]
   ./client logs <client> [service]
@@ -325,6 +326,17 @@ EOFCLIENT
     log_info "Arrêt de ${client}..."
     dc "$client" down
     log_ok "Client ${client} arrêté."
+    ;;
+
+  delete)
+    [[ -n "$client" ]] || usage
+    ensure_client_exists "$client"
+    cdir="$(client_dir "$client")"
+    project="$(get_env "$client" PROJECT)"
+    log_info "Suppression du client ${client} (containers + volumes + fichiers)..."
+    docker compose -f "$(compose_file "$client")" --env-file "$(env_file "$client")" -p "$project" down -v --remove-orphans >/dev/null 2>&1 || true
+    rm -rf "$cdir"
+    log_ok "Client ${client} supprimé."
     ;;
 
   restart)
