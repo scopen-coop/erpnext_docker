@@ -180,7 +180,7 @@ ensure_core_apps_git_ready() {
       log_warn "App ${app_name} sans .git: conversion en repo Git (backup: ${backup_dir##*/})..."
       mv "$app_dir" "$backup_dir"
 
-      if git clone --depth 1 --branch "$target_branch" "$repo_url" "$app_dir" >/dev/null 2>&1; then
+      if git clone --branch "$target_branch" "$repo_url" "$app_dir" >/dev/null 2>&1; then
         changed=1
         log_ok "App ${app_name} convertie en Git (${target_branch})."
       else
@@ -489,11 +489,13 @@ host_clone_and_copy_app() {
   backend_id="$(dc "$client" ps -q backend | head -n1)"
   [[ -n "$backend_id" ]] || log_err "Container backend introuvable pour ${client}."
 
+  local container_tmp_dir="/tmp/codex-app-import-${repo_name}-$(date +%s)-$$"
+
   log_info "Import de l'app dans le bench du conteneur..."
-  bench_exec "$client" "rm -rf /tmp/${repo_name} /home/frappe/frappe-bench/apps/${repo_name}"
-  docker cp "$repo_dir" "${backend_id}:/tmp/${repo_name}"
-  bench_exec "$client" "cd /home/frappe/frappe-bench && bench get-app --skip-assets /tmp/${repo_name}"
-  bench_exec "$client" "cd /home/frappe/frappe-bench && rm -rf /tmp/${repo_name}"
+  dc "$client" exec -u root -T backend bash -lc "rm -rf '${container_tmp_dir}' '/home/frappe/frappe-bench/apps/${repo_name}'"
+  docker cp "$repo_dir" "${backend_id}:${container_tmp_dir}"
+  bench_exec "$client" "cd /home/frappe/frappe-bench && bench get-app --skip-assets '${container_tmp_dir}'"
+  dc "$client" exec -u root -T backend bash -lc "rm -rf '${container_tmp_dir}'"
   set_app_git_remote "$client" "$repo_name" "$repo_url" "$branch"
 
   rm -rf "$tmp_dir"
