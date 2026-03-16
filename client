@@ -148,6 +148,9 @@ ensure_core_apps_git_ready() {
   local client="$1"
   local apps_dir
   apps_dir="$(client_dir "$client")/data/apps"
+  local backups_root
+  backups_root="$(client_dir "$client")/data/app-backups"
+  mkdir -p "$backups_root"
   local version
   version="$(get_env "$client" ERPNEXT_VERSION)"
   local branch
@@ -173,7 +176,7 @@ ensure_core_apps_git_ready() {
         fi
       fi
 
-      backup_dir="${apps_dir}/${app_name}.pre-git-backup-$(date +%Y%m%d%H%M%S)"
+      backup_dir="${backups_root}/${app_name}.pre-git-backup-$(date +%Y%m%d%H%M%S)"
       log_warn "App ${app_name} sans .git: conversion en repo Git (backup: ${backup_dir##*/})..."
       mv "$app_dir" "$backup_dir"
 
@@ -191,6 +194,44 @@ ensure_core_apps_git_ready() {
   if (( changed == 1 )); then
     fix_permissions "$client"
   fi
+}
+
+cleanup_legacy_git_backups_from_apps_dir() {
+  local client="$1"
+  local apps_dir
+  apps_dir="$(client_dir "$client")/data/apps"
+  local backups_root
+  backups_root="$(client_dir "$client")/data/app-backups"
+  mkdir -p "$backups_root"
+
+  local legacy
+  shopt -s nullglob
+  for legacy in "${apps_dir}"/frappe.pre-git-backup-* "${apps_dir}"/erpnext.pre-git-backup-*; do
+    [[ -e "$legacy" ]] || continue
+    mv "$legacy" "${backups_root}/"
+  done
+  shopt -u nullglob
+}
+
+sanitize_site_apps_file() {
+  local client="$1"
+  local site_apps_file
+  site_apps_file="$(client_dir "$client")/data/sites/apps.txt"
+  [[ -f "$site_apps_file" ]] || return 0
+
+  local tmp_file
+  tmp_file="$(mktemp)"
+  while IFS= read -r app; do
+    app="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//' <<<"$app")"
+    [[ -z "$app" ]] && continue
+    if [[ "$app" == *.pre-git-backup-* ]]; then
+      continue
+    fi
+    echo "$app" >>"$tmp_file"
+  done <"$site_apps_file"
+
+  sort -u "$tmp_file" >"$site_apps_file"
+  rm -f "$tmp_file"
 }
 
 non_updatable_apps_for_client() {
@@ -211,6 +252,43 @@ non_updatable_apps_for_client() {
       echo "$app"
     elif ! git -C "${apps_dir}/${app}" symbolic-ref -q --short HEAD >/dev/null 2>&1; then
       echo "$app"
+    fi
+  done <"$site_apps_file"
+}
+
+ensure_upstream_remote_for_bench_update() {
+  local client="$1"
+  local apps_dir
+  apps_dir="$(client_dir "$client")/data/apps"
+  local site_apps_file
+  site_apps_file="$(client_dir "$client")/data/sites/apps.txt"
+  [[ -f "$site_apps_file" ]] || return 0
+
+  local app app_dir origin_url target_upstream
+  while IFS= read -r app; do
+    app="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//' <<<"$app")"
+    [[ -z "$app" ]] && continue
+    app_dir="${apps_dir}/${app}"
+    [[ -d "${app_dir}/.git" ]] || continue
+
+    if git -C "$app_dir" remote get-url upstream >/dev/null 2>&1; then
+      continue
+    fi
+
+    target_upstream=""
+    case "$app" in
+      frappe) target_upstream="https://github.com/frappe/frappe.git" ;;
+      erpnext) target_upstream="https://github.com/frappe/erpnext.git" ;;
+      *)
+        origin_url="$(git -C "$app_dir" remote get-url origin 2>/dev/null || true)"
+        if [[ -n "$origin_url" ]]; then
+          target_upstream="$origin_url"
+        fi
+        ;;
+    esac
+
+    if [[ -n "$target_upstream" ]]; then
+      git -C "$app_dir" remote add upstream "$target_upstream" >/dev/null 2>&1 || true
     fi
   done <"$site_apps_file"
 }
@@ -688,7 +766,10 @@ EOFCLIENT
     site="$(get_env "$client" SITE_NAME)"
     log_info "Bench update pour ${client}: ${bench_args[*]}"
     ensure_base_apps_seeded "$client"
+    cleanup_legacy_git_backups_from_apps_dir "$client"
+    sanitize_site_apps_file "$client"
     ensure_core_apps_git_ready "$client"
+    ensure_upstream_remote_for_bench_update "$client"
 
     non_updatable_apps="$(non_updatable_apps_for_client "$client" | sort -u || true)"
     if [[ -n "${non_updatable_apps}" ]]; then
