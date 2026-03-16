@@ -22,6 +22,7 @@ ERPNext/Frappe Docker Client Manager (dev)
 Usage:
   ./client list
   ./client create <client> [frappe_branch] [http_port] [site_name]
+  ./client host-map <client>
   ./client up <client>
   ./client down <client>
   ./client delete <client>
@@ -172,7 +173,19 @@ bench_exec() {
   fix_permissions "$client"
   dc "$client" up -d db redis-cache redis-queue redis-socketio backend websocket queue-short queue-long scheduler >/dev/null 2>&1
   sync_ssh_to_backend "$client"
-  dc "$client" exec -T backend bash -lc "cd /home/frappe/frappe-bench && if [[ -d apps/erpnext ]]; then env/bin/pip install -q -e apps/erpnext; fi && env/bin/pip install -q -e apps/frappe && for app in \$(ls -1 apps); do if [[ \"\$app\" != \"frappe\" && \"\$app\" != \"erpnext\" ]] && [[ -f \"apps/\$app/pyproject.toml\" || -f \"apps/\$app/setup.py\" ]]; then env/bin/pip install -q -e \"apps/\$app\"; fi; done && $cmd"
+  dc "$client" exec -T backend bash -lc "cd /home/frappe/frappe-bench && mkdir -p sites && ls -1 apps > sites/apps.txt && ln -snf sites/apps.txt apps.txt && if [[ -d apps/erpnext ]]; then env/bin/pip install -q -e apps/erpnext; fi && env/bin/pip install -q -e apps/frappe && for app in \$(ls -1 apps); do if [[ \"\$app\" != \"frappe\" && \"\$app\" != \"erpnext\" ]] && [[ -f \"apps/\$app/pyproject.toml\" || -f \"apps/\$app/setup.py\" ]]; then env/bin/pip install -q -e \"apps/\$app\"; fi; done && $cmd"
+}
+
+create_site_if_needed() {
+  local client="$1"
+  local site_name admin_password db_root_password
+  site_name="$(get_env "$client" SITE_NAME)"
+  admin_password="$(get_env "$client" ADMIN_PASSWORD)"
+  db_root_password="$(get_env "$client" DB_ROOT_PASSWORD)"
+
+  log_info "Création/initialisation du site ERPNext pour ${client}..."
+  bench_exec "$client" "cd /home/frappe/frappe-bench && if [[ -f \"sites/${site_name}/site_config.json\" ]]; then echo \"Site ${site_name} déjà initialisé.\"; else bench new-site --mariadb-user-host-login-scope='%' --db-host db --db-port 3306 --admin-password='${admin_password}' --db-root-username=root --db-root-password='${db_root_password}' --install-app erpnext --set-default '${site_name}'; fi"
+  log_ok "Site prêt pour ${client}."
 }
 
 restart_runtime_services() {
@@ -199,18 +212,42 @@ restart_runtime_services() {
 wait_http_ready() {
   local client="$1"
   local port
+  local site_name
+  local url
+  local tmp_body
+  local http_code
+  local attempts=0
   port="$(get_env "$client" HTTP_PORT)"
+  site_name="$(get_env "$client" SITE_NAME)"
+  url="http://localhost:${port}/api/method/ping"
   local timeout=180
   local elapsed=0
 
+  tmp_body="$(mktemp)"
   while (( elapsed < timeout )); do
-    if curl -fsS "http://localhost:${port}/api/method/ping" 2>/dev/null | grep -q "pong"; then
+    attempts=$((attempts + 1))
+    http_code="$(curl -s -m 3 --connect-timeout 1 -H "Host: ${site_name}" -o "$tmp_body" -w "%{http_code}" "$url" 2>/dev/null || true)"
+
+    if grep -q '"message":"pong"' "$tmp_body"; then
+      rm -f "$tmp_body"
       return 0
     fi
+
+    if [[ "$http_code" == "404" ]] && grep -q "does not exist" "$tmp_body"; then
+      log_info "Backend prêt, mais le site ${site_name} n'est pas encore initialisé."
+      rm -f "$tmp_body"
+      return 0
+    fi
+
+    if (( attempts % 10 == 0 )); then
+      log_info "Attente backend (${elapsed}s/${timeout}s)... code=${http_code:-n/a}"
+    fi
+
     sleep 2
     elapsed=$((elapsed + 2))
   done
 
+  rm -f "$tmp_body"
   log_warn "Le backend semble encore en cours de démarrage (timeout ${timeout}s)."
 }
 
@@ -238,6 +275,36 @@ next_port() {
   done
 }
 
+ensure_hosts_mapping() {
+  local host_name="$1"
+  local ip="${2:-127.0.0.1}"
+
+  [[ -n "$host_name" ]] || return 0
+
+  if awk -v host="$host_name" '
+    $1 !~ /^#/ {
+      for (i = 2; i <= NF; i++) {
+        if ($i == host) found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' /etc/hosts 2>/dev/null; then
+    log_info "Mapping hosts déjà présent: ${host_name}"
+    return 0
+  fi
+
+  if [[ -w /etc/hosts ]]; then
+    echo "${ip} ${host_name}" >> /etc/hosts
+    log_ok "Mapping ajouté dans /etc/hosts: ${host_name} -> ${ip}"
+    return 0
+  fi
+
+  log_warn "Impossible d'écrire dans /etc/hosts sans droits admin."
+  log_info "Ajoute cette ligne:"
+  echo "  ${ip} ${host_name}"
+  log_info "Commande (Linux): sudo sh -c 'echo \"${ip} ${host_name}\" >> /etc/hosts'"
+}
+
 cmd="${1:-}"
 client="${2:-}"
 
@@ -259,8 +326,8 @@ case "$cmd" in
     mkdir -p "$cdir"/data/{apps,db,logs,sites,redis-cache,redis-queue,redis-socketio}
     cp "$TEMPLATE_COMPOSE" "$cdir/docker-compose.yml"
 
-    db_root_password="$(rand_hex 12)"
-    admin_password="$(rand_hex 12)"
+    db_root_password="123"
+    admin_password="admin"
 
     cat >"$cdir/.env" <<EOFENV
 PROJECT=erpnext-${client}
@@ -287,10 +354,14 @@ EOFCLIENT
 
     seed_apps_from_git "$client"
     fix_permissions "$client"
+    ensure_hosts_mapping "$site_name"
 
-    log_ok "Client '${client}' créé (${frappe_branch}, port ${http_port})."
-    log_info "Démarrage: ./client up ${client}"
-    log_info "Initialisation du site: ./client site-create ${client}"
+    log_info "Démarrage automatique de ${client}..."
+    dc "$client" up -d --build --remove-orphans
+    create_site_if_needed "$client"
+    wait_http_ready "$client"
+
+    log_ok "Client '${client}' créé et initialisé (${frappe_branch}, port ${http_port})."
     ;;
 
   list)
@@ -317,8 +388,15 @@ EOFCLIENT
     fix_permissions "$client"
     log_info "Build/démarrage de ${client}..."
     dc "$client" up -d --build --remove-orphans "${extra_args[@]}"
+    ensure_hosts_mapping "$(get_env "$client" SITE_NAME)"
     wait_http_ready "$client"
     log_ok "Client ${client} démarré."
+    ;;
+
+  host-map)
+    [[ -n "$client" ]] || usage
+    ensure_client_exists "$client"
+    ensure_hosts_mapping "$(get_env "$client" SITE_NAME)"
     ;;
 
   down)
@@ -373,12 +451,7 @@ EOFCLIENT
     [[ -n "$client" ]] || usage
     seed_apps_from_git "$client"
     fix_permissions "$client"
-    site_name="$(get_env "$client" SITE_NAME)"
-    admin_password="$(get_env "$client" ADMIN_PASSWORD)"
-    db_root_password="$(get_env "$client" DB_ROOT_PASSWORD)"
-    log_info "Création/initialisation du site ERPNext pour ${client}..."
-    bench_exec "$client" "cd /home/frappe/frappe-bench && if [[ -f \"sites/${site_name}/site_config.json\" ]]; then echo \"Site ${site_name} déjà initialisé.\"; else bench new-site --mariadb-user-host-login-scope='%' --admin-password='${admin_password}' --db-root-username=root --db-root-password='${db_root_password}' --install-app erpnext --set-default '${site_name}'; fi"
-    log_ok "Site créé pour ${client}."
+    create_site_if_needed "$client"
     ;;
 
   restore)

@@ -24,15 +24,10 @@ Principe:
 
 ```bash
 # 1) Créer un client (branche Frappe/ERPNext)
+#    -> clone apps, build, up, mapping hosts, create site automatiquement
 ./client create acme version-15 8080 acme.local
 
-# 2) Build + démarrage
-./client up acme
-
-# 3) Créer le site (première fois)
-./client site-create acme
-
-# 4) URL
+# 2) URL
 ./client url acme
 ```
 
@@ -41,13 +36,16 @@ Principe:
 ```bash
 ./client list
 ./client create <client> [frappe_branch] [http_port] [site_name]
+./client host-map <client>
 ./client up <client>
 ./client down <client>
+./client delete <client>
 ./client restart <client>
 ./client status [client]
 ./client logs <client> [service]
 ./client shell <client>
 ./client site-create <client>
+./client restore <client> <backup_sql_gz> [site_name]
 ./client app-list <client>
 ./client app-get <client> <repo_url> [branch]
 ./client app-install <client> <app_name>
@@ -60,5 +58,8 @@ Principe:
 ## Notes
 
 - `version-15` / `v15` / `15` sont normalisés vers `version-15` pour le clone Git.
-- Le premier `./client up <client>` fait le build Docker local (plus long).
+- `./client create` démarre automatiquement la stack et initialise le site ERPNext.
+- `./client up <client>` fait le build/démarrage sans recréer le site (utiliser `site-create` si besoin).
+- `./client bench-update <client>` force par défaut `--reset --no-backup` (sauf si déjà fournis).
+- Le script attend la disponibilité du backend et affiche la progression pendant le démarrage.
 - Le backend est exposé directement sur `http://localhost:<port>`.
