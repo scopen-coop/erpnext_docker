@@ -117,6 +117,104 @@ ensure_base_apps_seeded() {
   fi
 }
 
+core_branch_from_erpnext_version() {
+  local version="$1"
+
+  if [[ "$version" =~ ^version-([0-9]+)$ ]]; then
+    echo "version-${BASH_REMATCH[1]}"
+    return
+  fi
+
+  if [[ "$version" =~ ^v?([0-9]+)(\..*)?$ ]]; then
+    echo "version-${BASH_REMATCH[1]}"
+    return
+  fi
+
+  if [[ "$version" == "develop" || "$version" == "nightly" ]]; then
+    echo "develop"
+    return
+  fi
+
+  echo "develop"
+}
+
+git_remote_branch_exists() {
+  local repo_url="$1"
+  local branch="$2"
+  git ls-remote --exit-code --heads "$repo_url" "$branch" >/dev/null 2>&1
+}
+
+ensure_core_apps_git_ready() {
+  local client="$1"
+  local apps_dir
+  apps_dir="$(client_dir "$client")/data/apps"
+  local version
+  version="$(get_env "$client" ERPNEXT_VERSION)"
+  local branch
+  branch="$(core_branch_from_erpnext_version "$version")"
+  local changed=0
+
+  local spec app_name repo_url app_dir target_branch backup_dir
+  for spec in \
+    "frappe|https://github.com/frappe/frappe.git" \
+    "erpnext|https://github.com/frappe/erpnext.git"; do
+    app_name="${spec%%|*}"
+    repo_url="${spec##*|}"
+    app_dir="${apps_dir}/${app_name}"
+
+    if [[ -d "$app_dir" && ! -d "${app_dir}/.git" ]]; then
+      need_cmd git
+      target_branch="$branch"
+      if ! git_remote_branch_exists "$repo_url" "$target_branch"; then
+        if git_remote_branch_exists "$repo_url" "develop"; then
+          target_branch="develop"
+        else
+          log_err "Impossible de trouver une branche Git valide pour ${app_name} (${branch}/develop absentes)."
+        fi
+      fi
+
+      backup_dir="${apps_dir}/${app_name}.pre-git-backup-$(date +%Y%m%d%H%M%S)"
+      log_warn "App ${app_name} sans .git: conversion en repo Git (backup: ${backup_dir##*/})..."
+      mv "$app_dir" "$backup_dir"
+
+      if git clone --depth 1 --branch "$target_branch" "$repo_url" "$app_dir" >/dev/null 2>&1; then
+        changed=1
+        log_ok "App ${app_name} convertie en Git (${target_branch})."
+      else
+        rm -rf "$app_dir"
+        mv "$backup_dir" "$app_dir"
+        log_err "Échec du clone Git pour ${app_name}; dossier restauré depuis backup."
+      fi
+    fi
+  done
+
+  if (( changed == 1 )); then
+    fix_permissions "$client"
+  fi
+}
+
+non_updatable_apps_for_client() {
+  local client="$1"
+  local apps_dir
+  apps_dir="$(client_dir "$client")/data/apps"
+  local site_apps_file
+  site_apps_file="$(client_dir "$client")/data/sites/apps.txt"
+
+  [[ -f "$site_apps_file" ]] || return 0
+
+  local app
+  while IFS= read -r app; do
+    app="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//' <<<"$app")"
+    [[ -z "$app" ]] && continue
+
+    if [[ ! -d "${apps_dir}/${app}/.git" ]]; then
+      echo "$app"
+    elif ! git -C "${apps_dir}/${app}" symbolic-ref -q --short HEAD >/dev/null 2>&1; then
+      echo "$app"
+    fi
+  done <"$site_apps_file"
+}
+
 fix_permissions() {
   local client="$1"
   local version
@@ -589,8 +687,10 @@ EOFCLIENT
     fi
     site="$(get_env "$client" SITE_NAME)"
     log_info "Bench update pour ${client}: ${bench_args[*]}"
+    ensure_base_apps_seeded "$client"
+    ensure_core_apps_git_ready "$client"
 
-    non_updatable_apps="$(dc "$client" exec -T backend bash -lc 'cd /home/frappe/frappe-bench && for app in $(cat sites/apps.txt); do if [[ ! -d \"apps/$app/.git\" ]]; then echo \"$app\"; elif ! git -C \"apps/$app\" symbolic-ref -q --short HEAD >/dev/null 2>&1; then echo \"$app\"; fi; done' 2>/dev/null || true)"
+    non_updatable_apps="$(non_updatable_apps_for_client "$client" | sort -u || true)"
     if [[ -n "${non_updatable_apps}" ]]; then
       app_list="$(tr '\n' ',' <<<"${non_updatable_apps}" | sed 's/,$//')"
       log_warn "Apps non updatables via git détectées (${app_list}). Fallback vers migrate."
