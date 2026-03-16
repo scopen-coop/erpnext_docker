@@ -46,6 +46,7 @@ Projet pour créer et gérer des environnements Docker ERPNext/Frappe par client
 ./client app-install <client> <app_name>
 ./client app-get-install <client> <repo_url> [branch] [app_name]
 ./client restore <client> <dump.sql|dump.sql.gz> [db_name]
+./client fix-perms <client>
 ./client url <client>
 ```
 
@@ -91,3 +92,4 @@ Note: si le dump référence des apps non présentes dans `data/apps`, la comman
 - Le port HTTP est exposé en local (`localhost:<port>`).
 - Si le port n'est pas fourni à la création, le script prend automatiquement le prochain port libre à partir de `8080`.
 - Les mots de passe admin/db sont générés automatiquement dans `clients/<client>/.env`.
+- En cas de volumes créés avec de mauvais droits (erreurs `Permission denied` sur `sites/` ou `logs/bench.log`), lancer `./client fix-perms <client>`.

@@ -1,4 +1,22 @@
 services:
+  permissions:
+    image: frappe/erpnext:${ERPNEXT_VERSION}
+    user: "0:0"
+    restart: "no"
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - |
+        set -e;
+        mkdir -p /home/frappe/frappe-bench/apps /home/frappe/frappe-bench/sites /home/frappe/frappe-bench/logs;
+        chown -R frappe:frappe /home/frappe/frappe-bench/apps /home/frappe/frappe-bench/sites /home/frappe/frappe-bench/logs;
+        chmod -R u+rwX,g+rwX /home/frappe/frappe-bench/apps /home/frappe/frappe-bench/sites /home/frappe/frappe-bench/logs;
+    volumes:
+      - ./data/apps:/home/frappe/frappe-bench/apps
+      - ./data/sites:/home/frappe/frappe-bench/sites
+      - ./data/logs:/home/frappe/frappe-bench/logs
+
   backend:
     image: frappe/erpnext:${ERPNEXT_VERSION}
     restart: unless-stopped
@@ -10,6 +28,8 @@ services:
       redis-queue:
         condition: service_started
       configurator:
+        condition: service_completed_successfully
+      permissions:
         condition: service_completed_successfully
     entrypoint:
       - bash
@@ -51,6 +71,8 @@ services:
         condition: service_started
       redis-queue:
         condition: service_started
+      permissions:
+        condition: service_completed_successfully
     entrypoint:
       - bash
       - -c
@@ -93,6 +115,8 @@ services:
       redis-queue:
         condition: service_started
       configurator:
+        condition: service_completed_successfully
+      permissions:
         condition: service_completed_successfully
     entrypoint:
       - bash

@@ -36,6 +36,7 @@ Usage:
   ./client restore <client> <dump.sql|dump.sql.gz> [db_name]
   ./client bench-update <client> [bench_update_args...]
   ./client git-remote-set <client> <app_name> <repo_url> [branch]
+  ./client fix-perms <client>
   ./client url <client>
 USAGE
   exit 1
@@ -116,10 +117,29 @@ ensure_base_apps_seeded() {
   fi
 }
 
+fix_permissions() {
+  local client="$1"
+  local version
+  version="$(get_env "$client" ERPNEXT_VERSION)"
+  [[ -n "$version" ]] || log_err "ERPNEXT_VERSION manquant pour ${client}"
+
+  local cdir
+  cdir="$(client_dir "$client")"
+  mkdir -p "$cdir"/data/{apps,sites,logs}
+
+  docker run --rm -u 0:0 \
+    -v "${cdir}/data/apps:/home/frappe/frappe-bench/apps" \
+    -v "${cdir}/data/sites:/home/frappe/frappe-bench/sites" \
+    -v "${cdir}/data/logs:/home/frappe/frappe-bench/logs" \
+    "frappe/erpnext:${version}" \
+    bash -lc 'chown -R frappe:frappe /home/frappe/frappe-bench/apps /home/frappe/frappe-bench/sites /home/frappe/frappe-bench/logs && chmod -R u+rwX,g+rwX /home/frappe/frappe-bench/apps /home/frappe/frappe-bench/sites /home/frappe/frappe-bench/logs' >/dev/null
+}
+
 bench_exec() {
   local client="$1"
   local cmd="$2"
   ensure_base_apps_seeded "$client"
+  fix_permissions "$client"
   dc "$client" up -d db redis-cache redis-queue backend >/dev/null 2>&1
   dc "$client" exec -T backend bash -lc "$cmd"
 }
@@ -416,6 +436,7 @@ EOFCLIENT
     [[ -n "$client" ]] || usage
     extra_args=("${@:3}")
     ensure_base_apps_seeded "$client"
+    fix_permissions "$client"
     log_info "Démarrage de ${client}..."
     dc "$client" up -d --remove-orphans "${extra_args[@]}"
     log_ok "Client ${client} démarré."
@@ -461,6 +482,7 @@ EOFCLIENT
   site-create)
     [[ -n "$client" ]] || usage
     ensure_base_apps_seeded "$client"
+    fix_permissions "$client"
     log_info "Création/initialisation du site ERPNext pour ${client}..."
     dc "$client" --profile init run --rm create-site
     log_ok "Site créé pour ${client}."
@@ -590,6 +612,14 @@ EOFCLIENT
     need_cmd git
     set_app_git_remote "$client" "$app_name" "$repo_url" "$branch"
     log_ok "Remote git configuré pour ${client}/${app_name}: ${repo_url}"
+    ;;
+
+  fix-perms)
+    [[ -n "$client" ]] || usage
+    ensure_base_apps_seeded "$client"
+    log_info "Correction des permissions volumes pour ${client}..."
+    fix_permissions "$client"
+    log_ok "Permissions corrigées pour ${client}."
     ;;
 
   url)
