@@ -1,0 +1,12 @@
+[submodule "apps/erpnext_france"]
+	path = apps/erpnext_france
+	url = git@github.com:scopen-coop/erpnext_france.git
+	branch = version-15
+[submodule "apps/erpnext_building"]
+	path = apps/erpnext_building
+	url = git@github.com:scopen-coop/erpnext_building.git
+	branch = version-15
+[submodule "apps/hrms"]
+	path = apps/hrms
+	url = git@github.com:frappe/hrms.git
+	branch = version-15

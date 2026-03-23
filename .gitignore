@@ -1,2 +1,10 @@
 clients/**
 !clients/.gitkeep
+
+# Dépôts de référence locaux (cache pour clones rapides, non trackés)
+.refs/
+
+# Les clones frappe/erpnext dans apps/ ne sont pas trackés (trop lourds)
+# Seuls les submodules custom ajoutés via "module-add" sont trackés
+apps/frappe/
+apps/erpnext/
