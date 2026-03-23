@@ -901,7 +901,7 @@ EOFCLIENT
     bench_args=("${@:3}")
 
     # Ajoute --reset et --no-backup par défaut
-    local has_reset=0 has_no_backup=0
+    has_reset=0 has_no_backup=0
     for arg in "${bench_args[@]}"; do
       [[ "$arg" == "--reset" ]] && has_reset=1
       [[ "$arg" == "--no-backup" ]] && has_no_backup=1
