@@ -32,6 +32,7 @@ x-app-env: &app-env
     FRAPPE_REDIS_CACHE: redis://redis-cache:6379
     FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
     FRAPPE_SOCKETIO: redis-socketio:6379
+    HTTP_PORT: ${HTTP_PORT}
 
 services:
   backend:
@@ -78,7 +79,8 @@ services:
         bench set-config -g redis_cache "redis://$$REDIS_CACHE"
         bench set-config -g redis_queue "redis://$$REDIS_QUEUE"
         bench set-config -g redis_socketio "redis://$$REDIS_SOCKETIO"
-        bench set-config -gp socketio_port 9000
+        # socketio_port = port nginx du client → le navigateur se connecte via nginx, pas directement
+        bench set-config -gp socketio_port $$HTTP_PORT
 
         # Yarn install pour les apps avec package.json
         for app in $$(ls -1 apps 2>/dev/null); do

@@ -1,0 +1,157 @@
+.mask-radial-faded {
+  -webkit-mask-image: radial-gradient(circle at center, black 44%, transparent 100%);
+  mask-image: radial-gradient(circle at center, black 44%, transparent 100%);
+}
+
+.terminal-panel::-webkit-scrollbar,
+#jobCommand::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.terminal-panel::-webkit-scrollbar-thumb,
+#jobCommand::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.22);
+  background-clip: padding-box;
+}
+
+.terminal-panel::-webkit-scrollbar-track,
+#jobCommand::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.control-button {
+  display: inline-flex;
+  width: auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: rgb(226, 232, 240);
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease,
+    color 160ms ease;
+}
+
+.control-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(148, 163, 184, 0.26);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.control-button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.control-button-accent {
+  border-color: rgba(34, 197, 94, 0.22);
+  background: rgba(34, 197, 94, 0.12);
+  color: rgb(134, 239, 172);
+}
+
+.control-button-accent:hover {
+  border-color: rgba(134, 239, 172, 0.34);
+  background: rgba(34, 197, 94, 0.18);
+  color: rgb(220, 252, 231);
+}
+
+.control-button-danger {
+  border-color: rgba(251, 113, 133, 0.2);
+  background: rgba(251, 113, 133, 0.1);
+  color: rgb(254, 205, 211);
+}
+
+.control-button-danger:hover {
+  border-color: rgba(251, 113, 133, 0.34);
+  background: rgba(251, 113, 133, 0.16);
+  color: rgb(255, 228, 230);
+}
+
+.input-shell {
+  width: 100%;
+  border-radius: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(2, 6, 23, 0.8);
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  color: white;
+  outline: none;
+  transition: border-color 160ms ease;
+}
+
+.input-shell::placeholder {
+  color: rgb(71, 85, 105);
+}
+
+.input-shell:focus {
+  border-color: rgba(52, 211, 153, 0.4);
+}
+
+.badge,
+.service-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.badge-running,
+.service-chip.badge-running {
+  border-color: rgba(34, 197, 94, 0.14);
+  background: rgba(34, 197, 94, 0.12);
+  color: rgb(134, 239, 172);
+}
+
+.badge-degraded,
+.badge-exited,
+.badge-created,
+.service-chip.badge-degraded,
+.service-chip.badge-exited,
+.service-chip.badge-created {
+  border-color: rgba(245, 158, 11, 0.16);
+  background: rgba(245, 158, 11, 0.11);
+  color: rgb(253, 224, 71);
+}
+
+.badge-stopped,
+.badge-docker-error,
+.badge-docker-permission,
+.badge-docker-missing,
+.service-chip.badge-stopped,
+.service-chip.badge-docker-error,
+.service-chip.badge-docker-permission,
+.service-chip.badge-docker-missing {
+  border-color: rgba(148, 163, 184, 0.14);
+  background: rgba(148, 163, 184, 0.09);
+  color: rgb(148, 163, 184);
+}
+
+.badge-failed,
+.service-chip.badge-failed {
+  border-color: rgba(251, 113, 133, 0.16);
+  background: rgba(251, 113, 133, 0.1);
+  color: rgb(254, 205, 211);
+}
+
+.open-link.disabled {
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.overflow-wrap-anywhere {
+  overflow-wrap: anywhere;
+}

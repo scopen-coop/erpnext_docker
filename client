@@ -24,6 +24,7 @@ ERPNext/Frappe Docker Client Manager (dev)
 
 Gestion des clients:
   ./client list
+  ./client ui [port]
   ./client create <client> [branch] [port] [site_name]
   ./client up <client>
   ./client down <client>
@@ -553,6 +554,14 @@ EOFCLIENT
     ;;
 
   # -------------------------------------------------------------------------
+  ui)
+    ui_port="${2:-8099}"
+    [[ "$ui_port" =~ ^[0-9]+$ ]] || log_err "Port UI invalide: ${ui_port}"
+    log_info "Démarrage de l'interface web sur http://127.0.0.1:${ui_port}"
+    exec python3 "${ROOT_DIR}/ui/server.py" --port "${ui_port}"
+    ;;
+
+  # -------------------------------------------------------------------------
   up)
     [[ -n "$client" ]] || usage
     extra_args=("${@:3}")
@@ -584,7 +593,11 @@ EOFCLIENT
     cdir="$(client_dir "$client")"
     project="$(get_env "$client" PROJECT)"
     log_warn "Suppression du client ${client} (containers + volumes + fichiers)..."
-    read -r -p "Confirmer ? [y/N] " confirm
+    if [[ "${CLIENT_NON_INTERACTIVE:-0}" == "1" ]]; then
+      confirm="y"
+    else
+      read -r -p "Confirmer ? [y/N] " confirm
+    fi
     [[ "$confirm" =~ ^[yYoO]$ ]] || { log_info "Annulé."; exit 0; }
     docker compose -f "$(compose_file "$client")" --env-file "$(env_file "$client")" \
       -p "$project" down -v --remove-orphans >/dev/null 2>&1 || true

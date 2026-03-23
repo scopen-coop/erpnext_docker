@@ -35,6 +35,7 @@ Principe:
 
 ```bash
 ./client list
+./client ui [port]
 ./client create <client> [frappe_branch] [http_port] [site_name]
 ./client host-map <client>
 ./client up <client>
@@ -54,6 +55,21 @@ Principe:
 ./client fix-perms <client>
 ./client url <client>
 ```
+
+## Interface web
+
+```bash
+./client ui
+```
+
+Puis ouvrir `http://127.0.0.1:8099`.
+
+La première version permet de:
+- lister les clients et leur état Docker
+- ouvrir rapidement une instance
+- créer un client
+- lancer les actions courantes (`up`, `down`, `restart`, `site-create`, `host-map`, `fix-perms`)
+- suivre les logs d'exécution des commandes déclenchées depuis l'interface
 
 ## Notes
 
